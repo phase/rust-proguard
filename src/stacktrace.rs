@@ -1,5 +1,6 @@
 //! A Parser for Java Stacktraces.
 
+use std::borrow::Cow;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// A full Java StackTrace as printed by [`Throwable.printStackTrace()`].
@@ -277,7 +278,7 @@ pub(crate) fn parse_frame(line: &str) -> Option<StackFrame> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Throwable<'s> {
     pub(crate) class: &'s str,
-    pub(crate) message: Option<&'s str>,
+    pub(crate) message: Option<Cow<'s, str>>,
 }
 
 impl<'s> Throwable<'s> {
@@ -293,7 +294,7 @@ impl<'s> Throwable<'s> {
     pub fn with_message(class: &'s str, message: &'s str) -> Self {
         Self {
             class,
-            message: Some(message),
+            message: Some(Cow::Borrowed(message)),
         }
     }
 
@@ -319,8 +320,8 @@ impl<'s> Throwable<'s> {
     }
 
     /// The optional message of this Throwable.
-    pub fn message(&self) -> Option<&str> {
-        self.message
+    pub fn message(&self) -> Option<String> {
+        self.message.as_ref().map(|x| x.clone().into_owned())
     }
 }
 
@@ -328,7 +329,7 @@ impl<'s> Display for Throwable<'s> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.class)?;
 
-        if let Some(message) = self.message {
+        if let Some(message) = &self.message {
             write!(f, ": {}", message)?;
         }
 
@@ -347,7 +348,7 @@ pub(crate) fn parse_throwable(line: &str) -> Option<Throwable<'_>> {
 
     let mut class_split = line.splitn(2, ": ");
     let class = class_split.next()?;
-    let message = class_split.next();
+    let message = class_split.next().map(|x| Cow::Borrowed(x));
 
     if class.contains(' ') {
         None
@@ -365,7 +366,7 @@ mod tests {
         let trace = StackTrace {
             exception: Some(Throwable {
                 class: "com.example.MainFragment",
-                message: Some("Crash"),
+                message: Some(Cow::Borrowed("Crash")),
             }),
             frames: vec![StackFrame {
                 class: "com.example.Util",
@@ -376,7 +377,7 @@ mod tests {
             cause: Some(Box::new(StackTrace {
                 exception: Some(Throwable {
                     class: "com.example.Other",
-                    message: Some("Invalid data"),
+                    message: Some(Cow::Borrowed("Invalid data")),
                 }),
                 frames: vec![StackFrame {
                     class: "com.example.Parser",
@@ -453,7 +454,7 @@ Caused by: com.example.Other: Invalid data
         let throwable = parse_throwable(line);
         let expect = Some(Throwable {
             class: "com.example.MainFragment",
-            message: Some("Crash!"),
+            message: Some(Cow::Borrowed("Crash!")),
         });
 
         assert_eq!(expect, throwable);
@@ -470,7 +471,7 @@ Caused by: com.example.Other: Invalid data
 
         let throwable = Throwable {
             class: "com.example.MainFragment",
-            message: Some("Crash"),
+            message: Some(Cow::Borrowed("Crash")),
         };
 
         assert_eq!("com.example.MainFragment: Crash", throwable.to_string());

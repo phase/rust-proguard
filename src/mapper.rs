@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Error as FmtError, Write};
 use std::iter::FusedIterator;
@@ -200,6 +201,18 @@ impl<'s> ProguardMapper<'s> {
         RemappedFrameIter::empty()
     }
 
+    fn remap_throwable_message<'a>(&'a self, msg: &Cow<'a, str>) -> Cow<'a, str> {
+        // split the message into individual words & try to remap every word as a class
+        let new_msg = msg.split_ascii_whitespace().map(|word|{
+            self.remap_class(word).unwrap_or(word)
+        })
+        // re-join the words
+        .collect::<Vec<&str>>()
+        // note: ascii whitespace such as \n & \t is replaced with a space here
+        .join(" ");
+        Cow::Owned(new_msg)
+    }
+
     /// Remaps a throwable which is the first line of a full stacktrace.
     ///
     /// # Example
@@ -219,9 +232,15 @@ impl<'s> ProguardMapper<'s> {
     /// );
     /// ```
     pub fn remap_throwable<'a>(&'a self, throwable: &Throwable<'a>) -> Option<Throwable<'a>> {
-        self.remap_class(throwable.class).map(|class| Throwable {
-            class,
-            message: throwable.message,
+        let remapped_class = self.remap_class(throwable.class).clone();
+        let remapped_message = throwable.message.as_ref().map(|msg| self.remap_throwable_message(msg));
+
+        if let (None, None) = (&remapped_class, &remapped_message) {
+            return None;
+        }
+        Some(Throwable {
+            class: remapped_class.unwrap_or(throwable.class),
+            message: remapped_message,
         })
     }
 
@@ -355,7 +374,7 @@ com.example.MainFragment$onActivityCreated$4 -> com.example.MainFragment$g:
         let stacktrace = StackTrace {
             exception: Some(Throwable {
                 class: "com.example.MainFragment$e",
-                message: Some("Crash!"),
+                message: Some(Cow::Borrowed("Crash!")),
             }),
             frames: vec![
                 StackFrame {
@@ -374,7 +393,7 @@ com.example.MainFragment$onActivityCreated$4 -> com.example.MainFragment$g:
             cause: Some(Box::new(StackTrace {
                 exception: Some(Throwable {
                     class: "com.example.MainFragment$d",
-                    message: Some("Engines overheating"),
+                    message: Some(Cow::Borrowed("Engines overheating")),
                 }),
                 frames: vec![StackFrame {
                     class: "com.example.MainFragment$g",
@@ -433,6 +452,40 @@ Caused by: com.example.MainFragment$EngineFailureException: Engines overheating
     at com.example.MainFragment$onActivityCreated$4.onClick(SourceFile:65)
     ... 13 more\n";
 
+        let mapper = ProguardMapper::from(mapping);
+
+        assert_eq!(expect, mapper.remap_stacktrace(stacktrace).unwrap());
+    }
+
+    #[test]
+    fn stacktrace_npe() {
+        let mapping = "\
+com.example.MainFragment$EngineFailureException -> com.example.MainFragment$d:
+com.example.MainFragment$RocketException -> com.example.MainFragment$e:
+com.example.MainFragment$onActivityCreated$4 -> com.example.MainFragment$g:
+    1:1:void com.example.MainFragment$Rocket.startEngines():90:90 -> onClick
+    1:1:void com.example.MainFragment$Rocket.fly():83 -> onClick
+    1:1:void onClick(android.view.View):65 -> onClick
+    2:2:void com.example.MainFragment$Rocket.fly():85:85 -> onClick
+    2:2:void onClick(android.view.View):65 -> onClick
+    ";
+        let stacktrace = "\
+java.lang.NullPointerException: com.example.MainFragment$e is null
+    at com.example.MainFragment$g.onClick(SourceFile:2)
+    at android.view.View.performClick(View.java:7393)
+Caused by: com.example.MainFragment$d: Engines overheating
+    at com.example.MainFragment$g.onClick(SourceFile:1)
+    ... 13 more";
+        let expect = "\
+java.lang.NullPointerException: com.example.MainFragment$RocketException is null
+    at com.example.MainFragment$Rocket.fly(<unknown>:85)
+    at com.example.MainFragment$onActivityCreated$4.onClick(SourceFile:65)
+    at android.view.View.performClick(View.java:7393)
+Caused by: com.example.MainFragment$EngineFailureException: Engines overheating
+    at com.example.MainFragment$Rocket.startEngines(<unknown>:90)
+    at com.example.MainFragment$Rocket.fly(<unknown>:83)
+    at com.example.MainFragment$onActivityCreated$4.onClick(SourceFile:65)
+    ... 13 more\n";
         let mapper = ProguardMapper::from(mapping);
 
         assert_eq!(expect, mapper.remap_stacktrace(stacktrace).unwrap());
